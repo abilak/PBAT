@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 import pandas as pd
 import numpy as np
 from Bio import SeqIO
-dir = "/Users/miaanand/Downloads/PP/"
+dir = ""
 def extract_pdb_kd(text):
     """Extract PDB IDs and convert Kd/Ki values to pKd."""
     # Pattern to match PDB ID and Kd/Ki values
