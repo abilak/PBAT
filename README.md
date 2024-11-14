@@ -1,2 +1,2 @@
-# PPBAT
-PPBAT (Protein-Protein Binding Affinity Prediction using Transformers)
+# PBAT
+PBAT (Protein-Protein Binding Affinity Prediction using Transformers)
