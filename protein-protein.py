@@ -575,16 +575,15 @@ def main():
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}", exc_info=True)
         raise
-
-def optuna_optimization(): 
+def hyperparam_tune(): 
     def objective(trial):
-        # Hyperparameters to tune
-        embedding_dim = trial.suggest_int('embedding_dim', 128, 1024)
-        linear_dim = trial.suggest_int('linear_dim', 64, 2048)
+    # Hyperparameters to tune
+        embedding_dim = trial.suggest_int('embedding_dim', 128, 1024, step = 32)
+        linear_dim = trial.suggest_int('linear_dim', 64, 2048, step = 64)
         num_attention_layers = trial.suggest_int('num_attention_layers', 2, 6)
         num_heads = trial.suggest_int('num_heads', 3, 6)
         dropout_rate = trial.suggest_float('dropout_rate', 0, 0.25, step = 0.05)
-        learning_rate = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 3e-4], log=True)
+        learning_rate = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 3e-4])
         batch_size = trial.suggest_int('batch_size', 1, 10)
         epochs = trial.suggest_categorical('epochs', 100, 300, step = 50)
         patience = trial.suggest_categorical('patience', 5, 20, step = 5)
@@ -626,23 +625,24 @@ def optuna_optimization():
         history = trainer.train(
             train_loader=train_loader,
             val_loader=val_loader,
-            epochs=100,
+            epochs=epochs,
             learning_rate=learning_rate,
             save_dir=str(model_dir),
             model_name='protein_affinity_model.pt',
-            patience=10
+            patience=patience
         )
     
         results = trainer.evaluate(test_loader)
         return results['mse']
-
+    
     number_of_trials = 1000
-    study = optuna.create_study(direction="maximize")
+    study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=number_of_trials)
     good_trial = study.best_trial
     
     for key, value in good_trial.params.items():
             print("    {}: {}".format(key, value))
+
 
 if __name__ == "__main__":
     main()
