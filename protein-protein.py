@@ -14,6 +14,7 @@ from tqdm.auto import tqdm
 import pandas as pd
 import numpy as np
 from Bio import SeqIO
+import optuna
 dir = ""
 def extract_pdb_kd(text):
     """Extract PDB IDs and convert Kd/Ki values to pKd."""
@@ -456,7 +457,7 @@ def main():
 
         # Load protein sequences and binding affinities from PDB data
         data_path = os.path.join(os.getcwd(), "data/Protein-Protein Binding Affinity Data", "Data.csv")
-        df = pd.read_csv(data_path)
+        df = pd.read_csv(data_path, index_col = [0])[['pdb_id', 'pkd', 'protein1_sequence', 'protein2_sequence']]
         # Convert dataframe columns to lists
         protein1_sequences = df['protein1_sequence'].tolist()
         protein2_sequences = df['protein2_sequence'].tolist() 
@@ -590,36 +591,62 @@ def hyperparam_tune():
         output_dir.mkdir(parents=True, exist_ok=True)
         model_dir = output_dir / 'models'
         model_dir.mkdir(exist_ok=True)
-        
-        # Load protein sequences and binding affinities from PDB data
-        with open("/Users/miaanand/Downloads/PP/index/INDEX_general_PP.2020.txt", "r+") as myfile:
-            text = myfile.read()
-            df = extract_pdb_kd(text)
+
+        # Load protein sequences and binding affinities from CSV data
+        data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
+        logger.info(f"Loading data from {data_path}")
+        # Read the CSV file using pandas
+        df = pd.read_csv(data_path)
             
         # Convert dataframe columns to lists
         protein1_sequences = df['protein1_sequence'].tolist()
         protein2_sequences = df['protein2_sequence'].tolist() 
         affinities = df['pkd'].tolist()
-        
+
         # Remove any empty sequences
         valid_indices = [i for i in range(len(protein1_sequences)) 
                         if protein1_sequences[i] and protein2_sequences[i]]
         protein1_sequences = [protein1_sequences[i] for i in valid_indices]
         protein2_sequences = [protein2_sequences[i] for i in valid_indices]
         affinities = [affinities[i] for i in valid_indices]
+
+        # Log data loading status
+        logger.info(f"Loaded {len(protein1_sequences)} protein pairs")
     
-        
-        config = ModelConfig(input_dim = 768, embedding_dim = embedding_dim, linear_dim = linear_dim, num_attention_layers = num_attention_layers, num_heads = num_heads, dropout_rate = dropout_rate)
-        trainer = ProteinProteinAffinityTrainer(config=config, cache_dir=str(output_dir / 'embedding_cache'))
-        train_loader, val_loader, test_loader = trainer.prepare_data(
-                protein1_sequences=protein1_sequences,
-                protein2_sequences=protein2_sequences,
-                affinities=affinities,
-                batch_size=batch_size,
-                test_size=0.2,
-                val_size=0.1
+        config = ModelConfig(
+            input_dim=768,
+            embedding_dim=embedding_dim,
+            linear_dim=linear_dim,
+            num_attention_layers=num_attention_layers,
+            num_heads=num_heads,
+            dropout_rate=dropout_rate
         )
-        
+
+        # Save configuration
+        with open(output_dir / 'config.json', 'w') as f:
+            config_dict = {k: v for k, v in config.__dict__.items()}
+            json.dump(config_dict, f, indent=4)
+
+        # Initialize trainer
+        logger.info("Initializing trainer...")
+        trainer = ProteinProteinAffinityTrainer(
+            config=config,
+            cache_dir=str(output_dir / 'embedding_cache')
+        )
+
+        # Prepare data
+        logger.info("Preparing data...")
+        train_loader, val_loader, test_loader = trainer.prepare_data(
+            protein1_sequences=protein1_sequences,
+            protein2_sequences=protein2_sequences,
+            affinities=affinities,
+            batch_size=batch_size,
+            test_size=0.2,
+            val_size=0.1
+        )
+
+        # Training
+        logger.info("Starting training...")
         history = trainer.train(
             train_loader=train_loader,
             val_loader=val_loader,
@@ -629,10 +656,21 @@ def hyperparam_tune():
             model_name='protein_affinity_model.pt',
             patience=patience
         )
-    
+
+        # Evaluation
+        logger.info("Evaluating model...")
         results = trainer.evaluate(test_loader)
+
+        # Save evaluation results
+        with open(output_dir / 'evaluation_results.json', 'w') as f:
+            eval_results = {
+                'mse': float(results['mse']),
+                'rmse': float(results['rmse'])
+            }
+            json.dump(eval_results, f, indent=4)
+            
         return results['mse']
-    
+        
     number_of_trials = 1000
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=number_of_trials)
