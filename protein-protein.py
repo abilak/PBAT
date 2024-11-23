@@ -457,7 +457,7 @@ def main():
 
         # Load protein sequences and binding affinities from PDB data
         data_path = os.path.join(os.getcwd(), "data/Protein-Protein Binding Affinity Data", "Data.csv")
-        df = pd.read_csv(data_path)
+        df = pd.read_csv(data_path, index_col = [0])[['pdb_id', 'pkd', 'protein1_sequence', 'protein2_sequence']]
         # Convert dataframe columns to lists
         protein1_sequences = df['protein1_sequence'].tolist()
         protein2_sequences = df['protein2_sequence'].tolist() 
