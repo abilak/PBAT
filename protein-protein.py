@@ -681,4 +681,5 @@ def hyperparam_tune():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    hyperparam_tune()
