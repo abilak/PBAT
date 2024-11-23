@@ -455,9 +455,7 @@ def main():
         model_dir.mkdir(exist_ok=True)
 
         # Load protein sequences and binding affinities from PDB data
-        with open("/Users/miaanand/Downloads/PP/index/INDEX_general_PP.2020.txt", "r+") as myfile:
-            text = myfile.read()
-            df = extract_pdb_kd(text)
+        data_path = os.path.join(os.getcwd(), "data/Protein-Protein Binding Affinity Data", "Data.csv")
             
         # Convert dataframe columns to lists
         protein1_sequences = df['protein1_sequence'].tolist()
