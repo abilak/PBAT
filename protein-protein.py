@@ -575,71 +575,109 @@ def main():
         raise
 def hyperparam_tune(): 
     def objective(trial):
-    # Hyperparameters to tune
-        embedding_dim = trial.suggest_int('embedding_dim', 128, 1024, step = 32)
-        linear_dim = trial.suggest_int('linear_dim', 64, 2048, step = 64)
-        num_attention_layers = trial.suggest_int('num_attention_layers', 2, 6)
-        num_heads = trial.suggest_int('num_heads', 3, 6)
-        dropout_rate = trial.suggest_float('dropout_rate', 0, 0.25, step = 0.05)
-        learning_rate = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 3e-4])
-        batch_size = trial.suggest_int('batch_size', 1, 10)
-        epochs = trial.suggest_categorical('epochs', 100, 300, step = 50)
-        patience = trial.suggest_categorical('patience', 5, 20, step = 5)
+        def objective(trial):
+        # Hyperparameters to tune
+            embedding_dim = trial.suggest_int('embedding_dim', 128, 1024, step = 32)
+            linear_dim = trial.suggest_int('linear_dim', 64, 2048, step = 64)
+            num_attention_layers = trial.suggest_int('num_attention_layers', 2, 6)
+            num_heads = trial.suggest_int('num_heads', 3, 6)
+            dropout_rate = trial.suggest_float('dropout_rate', 0, 0.25, step = 0.05)
+            learning_rate = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 3e-4])
+            batch_size = trial.suggest_int('batch_size', 1, 10)
+            epochs = trial.suggest_categorical('epochs', 100, 300, step = 50)
+            patience = trial.suggest_categorical('patience', 5, 20, step = 5)
+        
+            output_dir = Path('output') 
+            output_dir.mkdir(parents=True, exist_ok=True)
+            model_dir = output_dir / 'models'
+            model_dir.mkdir(exist_ok=True)
     
-        output_dir = Path('output') 
-        output_dir.mkdir(parents=True, exist_ok=True)
-        model_dir = output_dir / 'models'
-        model_dir.mkdir(exist_ok=True)
-        
-        # Load protein sequences and binding affinities from PDB data
-        with open("/Users/miaanand/Downloads/PP/index/INDEX_general_PP.2020.txt", "r+") as myfile:
-            text = myfile.read()
-            df = extract_pdb_kd(text)
-            
-        # Convert dataframe columns to lists
-        protein1_sequences = df['protein1_sequence'].tolist()
-        protein2_sequences = df['protein2_sequence'].tolist() 
-        affinities = df['pkd'].tolist()
-        
-        # Remove any empty sequences
-        valid_indices = [i for i in range(len(protein1_sequences)) 
-                        if protein1_sequences[i] and protein2_sequences[i]]
-        protein1_sequences = [protein1_sequences[i] for i in valid_indices]
-        protein2_sequences = [protein2_sequences[i] for i in valid_indices]
-        affinities = [affinities[i] for i in valid_indices]
+            # Load protein sequences and binding affinities from CSV data
+            data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
+            logger.info(f"Loading data from {data_path}")
+            # Read the CSV file using pandas
+            df = pd.read_csv(data_path)
+                
+            # Convert dataframe columns to lists
+            protein1_sequences = df['protein1_sequence'].tolist()
+            protein2_sequences = df['protein2_sequence'].tolist() 
+            affinities = df['pkd'].tolist()
     
+            # Remove any empty sequences
+            valid_indices = [i for i in range(len(protein1_sequences)) 
+                            if protein1_sequences[i] and protein2_sequences[i]]
+            protein1_sequences = [protein1_sequences[i] for i in valid_indices]
+            protein2_sequences = [protein2_sequences[i] for i in valid_indices]
+            affinities = [affinities[i] for i in valid_indices]
+    
+            # Log data loading status
+            logger.info(f"Loaded {len(protein1_sequences)} protein pairs")
         
-        config = ModelConfig(input_dim = 768, embedding_dim = embedding_dim, linear_dim = linear_dim, num_attention_layers = num_attention_layers, num_heads = num_heads, dropout_rate = dropout_rate)
-        trainer = ProteinProteinAffinityTrainer(config=config, cache_dir=str(output_dir / 'embedding_cache'))
-        train_loader, val_loader, test_loader = trainer.prepare_data(
+            config = ModelConfig(
+                input_dim=768,
+                embedding_dim=embedding_dim,
+                linear_dim=linear_dim,
+                num_attention_layers=num_attention_layers,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate
+            )
+    
+            # Save configuration
+            with open(output_dir / 'config.json', 'w') as f:
+                config_dict = {k: v for k, v in config.__dict__.items()}
+                json.dump(config_dict, f, indent=4)
+    
+            # Initialize trainer
+            logger.info("Initializing trainer...")
+            trainer = ProteinProteinAffinityTrainer(
+                config=config,
+                cache_dir=str(output_dir / 'embedding_cache')
+            )
+    
+            # Prepare data
+            logger.info("Preparing data...")
+            train_loader, val_loader, test_loader = trainer.prepare_data(
                 protein1_sequences=protein1_sequences,
                 protein2_sequences=protein2_sequences,
                 affinities=affinities,
                 batch_size=batch_size,
                 test_size=0.2,
                 val_size=0.1
-        )
+            )
+    
+            # Training
+            logger.info("Starting training...")
+            history = trainer.train(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=epochs,
+                learning_rate=learning_rate,
+                save_dir=str(model_dir),
+                model_name='protein_affinity_model.pt',
+                patience=patience
+            )
+    
+            # Evaluation
+            logger.info("Evaluating model...")
+            results = trainer.evaluate(test_loader)
+    
+            # Save evaluation results
+            with open(output_dir / 'evaluation_results.json', 'w') as f:
+                eval_results = {
+                    'mse': float(results['mse']),
+                    'rmse': float(results['rmse'])
+                }
+                json.dump(eval_results, f, indent=4)
+                
+            return results['mse']
         
-        history = trainer.train(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=epochs,
-            learning_rate=learning_rate,
-            save_dir=str(model_dir),
-            model_name='protein_affinity_model.pt',
-            patience=patience
-        )
-    
-        results = trainer.evaluate(test_loader)
-        return results['mse']
-    
-    number_of_trials = 1000
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=number_of_trials)
-    good_trial = study.best_trial
-    
-    for key, value in good_trial.params.items():
-            print("    {}: {}".format(key, value))
+        number_of_trials = 1000
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=number_of_trials)
+        good_trial = study.best_trial
+        
+        for key, value in good_trial.params.items():
+                print("    {}: {}".format(key, value))
 
 
 if __name__ == "__main__":
