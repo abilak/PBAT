@@ -15,6 +15,10 @@ import pandas as pd
 import numpy as np
 from Bio import SeqIO
 import optuna
+import logging
+from datetime import datetime
+import json
+import matplotlib.pyplot as plt
 dir = ""
 def extract_pdb_kd(text):
     """Extract PDB IDs and convert Kd/Ki values to pKd."""
@@ -34,15 +38,15 @@ def extract_pdb_kd(text):
             'uM': 1e-6,
             'mM': 1e-3
         }
-        
+
         molar = value * conversion[unit]
         pkd = -np.log10(molar)
-        
+
         # Get FASTA sequences for this PDB
         pdb_path = os.path.join(dir, f"{pdb_id.lower()}.ent.pdb")
         protein1_seq = ""
         protein2_seq = ""
-        
+
         if os.path.exists(pdb_path):
             with open(pdb_path, 'r') as pdb_file:
                 seq_count = 0
@@ -53,7 +57,7 @@ def extract_pdb_kd(text):
                         protein2_seq = str(record.seq)
                         break
                     seq_count += 1
-                    
+
         data.append({
             'pdb_id': pdb_id,
             'pkd': pkd,
@@ -79,31 +83,48 @@ class ModelConfig:
         self.num_attention_layers = num_attention_layers
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
+
+def calculate_mean_scale():
+    data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
+
+    df = pd.read_csv(data_path)
+    affinities = df['pkd']
+    mean = affinities.mean()
+    scale = affinities.std()
+    return mean, scale
+
+print(calculate_mean_scale())
 class ProteinPairDataset(Dataset):
     """Dataset for protein pairs and their binding affinities"""
-    def __init__(self, protein1_sequences: List[str], 
-                 protein2_sequences: List[str], 
-                 affinities: torch.Tensor):
+    def __init__(self, protein1_sequences: List[str],
+                 protein2_sequences: List[str],
+                 affinities: torch.Tensor,
+                 mean: float = calculate_mean_scale()[0],
+                 scale: float = calculate_mean_scale()[1]):
         assert len(protein1_sequences) == len(protein2_sequences) == len(affinities)
-        self.protein1_sequences = protein1_sequences
-        self.protein2_sequences = protein2_sequences
-        self.affinities = affinities
+        # Convert sequences to strings explicitly
+        self.protein1_sequences = [str(seq).strip() for seq in protein1_sequences]
+        self.protein2_sequences = [str(seq).strip() for seq in protein2_sequences]
+        # Normalize affinities
+        self.affinities = (affinities - mean) / scale
+        self.mean = mean
+        self.scale = scale
 
     def __len__(self) -> int:
         return len(self.protein1_sequences)
 
     def __getitem__(self, idx: int) -> Tuple[str, str, float]:
-        return (self.protein1_sequences[idx], 
-                self.protein2_sequences[idx], 
+        return (self.protein1_sequences[idx],
+                self.protein2_sequences[idx],
                 self.affinities[idx])
 
 class ProteinProteinBindingModel(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
-        
+
         # Update projection layers to use input_dim
         self.protein_projection = nn.Linear(config.input_dim, config.embedding_dim)
-        
+
         # Rest of the initialization remains the same
         self.attention_layers = nn.ModuleList([
             nn.MultiheadAttention(
@@ -113,7 +134,7 @@ class ProteinProteinBindingModel(nn.Module):
                 batch_first=True
             ) for _ in range(config.num_attention_layers)
         ])
-        
+
         self.fc1 = nn.Linear(config.embedding_dim * 2, config.linear_dim)
         self.fc2 = nn.Linear(config.linear_dim, 1)
         self.dropout = nn.Dropout(config.dropout_rate)
@@ -122,13 +143,13 @@ class ProteinProteinAffinityLM(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        
+
         # Project protein embeddings to model dimension
         self.protein_projection = nn.Linear(
-            config.input_dim,  # Changed from config.protein_embedding_dim
+            config.input_dim,
             config.embedding_dim
         )
-                
+
         # Transformer encoder layer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.embedding_dim,
@@ -137,18 +158,18 @@ class ProteinProteinAffinityLM(nn.Module):
             dropout=config.dropout_rate,
             activation=F.gelu,
             batch_first=True,
-            norm_first=True  # Improved training stability
+            norm_first=True
         )
-        
+
         # Transformer encoder
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
             num_layers=config.num_attention_layers
         )
-        
+
         # Prediction head
         self.affinity_head = nn.Sequential(
-            nn.LayerNorm(config.embedding_dim),  # Added normalization
+            nn.LayerNorm(config.embedding_dim),
             nn.Linear(config.embedding_dim, config.linear_dim),
             nn.GELU(),
             nn.Dropout(config.dropout_rate),
@@ -158,21 +179,21 @@ class ProteinProteinAffinityLM(nn.Module):
             nn.Linear(config.linear_dim // 2, 1)
         )
 
-    def forward(self, protein1_embedding: torch.Tensor, 
+    def forward(self, protein1_embedding: torch.Tensor,
                 protein2_embedding: torch.Tensor) -> torch.Tensor:
         # Project proteins to common embedding space
         protein1_proj = self.protein_projection(protein1_embedding)
         protein2_proj = self.protein_projection(protein2_embedding)
-        
+
         # Combine embeddings for transformer
         combined = torch.stack([protein1_proj, protein2_proj], dim=1)
-        
+
         # Apply transformer and pool outputs
         transformed = self.transformer(combined)
         pooled = transformed.mean(dim=1)
-        
-        # Predict affinity
-        return self.affinity_head(pooled)
+
+        # Predict affinity and ensure output shape is consistent
+        return self.affinity_head(pooled).squeeze(-1)  # Add squeeze here
 
 class ProteinEmbeddingCache:
     """Cache for storing protein embeddings to avoid recomputation"""
@@ -181,17 +202,17 @@ class ProteinEmbeddingCache:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-    
+
     def get(self, protein_sequence: str) -> Optional[torch.Tensor]:
         return self.cache.get(protein_sequence)
-    
+
     def set(self, protein_sequence: str, embedding: torch.Tensor):
         self.cache[protein_sequence] = embedding
-    
+
     def save(self, filename: str):
         if self.cache_dir:
             torch.save(self.cache, self.cache_dir / filename)
-    
+
     def load(self, filename: str) -> bool:
         if self.cache_dir and (self.cache_dir / filename).exists():
             self.cache = torch.load(self.cache_dir / filename)
@@ -200,42 +221,42 @@ class ProteinEmbeddingCache:
 
 class ProteinProteinAffinityTrainer:
     """Trainer class for the protein-protein affinity model"""
-    def __init__(self, 
+    def __init__(self,
                  config: Optional[ModelConfig] = None,
                  device: Optional[str] = None,
                  cache_dir: Optional[str] = None):
         self.config = config or ModelConfig()
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         # Initialize models
         self.model = ProteinProteinAffinityLM(self.config).to(self.device)
         self.ankh_model, self.ankh_tokenizer = ankh.load_base_model()
         self.ankh_model.eval()
         self.ankh_model.to(self.device)
-        
+
         # Initialize embedding cache
         self.protein_cache = ProteinEmbeddingCache(cache_dir)
-        
-    def encode_proteins(self, 
-                       proteins: List[str], 
+
+    def encode_proteins(self,
+                       proteins: List[str],
                        batch_size: int = 2) -> torch.Tensor:
         """Encode proteins using the Ankh model with caching"""
         embeddings = []
-        
+
         for i in range(0, len(proteins), batch_size):
             batch = proteins[i:i+batch_size]
             batch_embeddings = []
-            
+
             for protein in batch:
                 # Check cache first
                 cached_embedding = self.protein_cache.get(protein)
                 if cached_embedding is not None:
                     batch_embeddings.append(cached_embedding)
                     continue
-                
+
                 # Compute embedding if not cached
-                tokens = self.ankh_tokenizer([protein], 
-                                          padding=True, 
+                tokens = self.ankh_tokenizer([protein],
+                                          padding=True,
                                           return_tensors="pt")
                 with torch.no_grad():
                     output = self.ankh_model(
@@ -245,12 +266,12 @@ class ProteinProteinAffinityTrainer:
                     embedding = output.last_hidden_state.mean(dim=1)
                     self.protein_cache.set(protein, embedding.cpu())
                     batch_embeddings.append(embedding)
-            
+
             embeddings.extend([emb.to(self.device) for emb in batch_embeddings])
-        
+
         return torch.cat(embeddings)
 
-    def prepare_data(self, 
+    def prepare_data(self,
                     protein1_sequences: List[str],
                     protein2_sequences: List[str],
                     affinities: List[float],
@@ -260,23 +281,23 @@ class ProteinProteinAffinityTrainer:
         """Prepare train, validation, and test data loaders"""
         # Convert affinities to tensor
         affinities_tensor = torch.tensor(affinities, dtype=torch.float32)
-        
+
         # Split data
         train_p1, test_p1, train_p2, test_p2, train_aff, test_aff = train_test_split(
             protein1_sequences, protein2_sequences, affinities_tensor,
             test_size=test_size, random_state=42
         )
-        
+
         train_p1, val_p1, train_p2, val_p2, train_aff, val_aff = train_test_split(
             train_p1, train_p2, train_aff,
             test_size=val_size, random_state=42
         )
-        
+
         # Create datasets and dataloaders
         train_dataset = ProteinPairDataset(train_p1, train_p2, train_aff)
         val_dataset = ProteinPairDataset(val_p1, val_p2, val_aff)
         test_dataset = ProteinPairDataset(test_p1, test_p2, test_aff)
-        
+
         return (
             DataLoader(train_dataset, batch_size=batch_size, shuffle=True),
             DataLoader(val_dataset, batch_size=batch_size),
@@ -294,7 +315,7 @@ class ProteinProteinAffinityTrainer:
         """Train the model with early stopping and logging"""
         save_path = Path(save_dir) / model_name
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=learning_rate,
@@ -304,23 +325,23 @@ class ProteinProteinAffinityTrainer:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=5
         )
-        
+
         best_val_loss = float('inf')
         patience_counter = 0
         history = {'train_loss': [], 'val_loss': []}
-        
+
         for epoch in range(epochs):
             # Training phase
             train_loss = self._train_epoch(train_loader, optimizer, criterion)
             history['train_loss'].append(train_loss)
-            
+
             # Validation phase
             val_loss = self._validate_epoch(val_loader, criterion)
             history['val_loss'].append(val_loss)
-            
+
             # Learning rate scheduling
             scheduler.step(val_loss)
-            
+
             # Early stopping and model saving
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -338,56 +359,66 @@ class ProteinProteinAffinityTrainer:
                 if patience_counter >= patience:
                     print(f'Early stopping triggered after {epoch+1} epochs')
                     break
-        
+
         return history
 
-    def _train_epoch(self, 
+    def _train_epoch(self,
                     train_loader: DataLoader,
                     optimizer: torch.optim.Optimizer,
                     criterion: nn.Module) -> float:
         """Train for one epoch"""
         self.model.train()
         total_loss = 0
-        
+
         with tqdm(train_loader, desc='Training') as pbar:
             for p1_seqs, p2_seqs, affinities in pbar:
                 # Encode proteins
                 p1_embeddings = self.encode_proteins(p1_seqs)
                 p2_embeddings = self.encode_proteins(p2_seqs)
                 affinities = affinities.to(self.device)
-                
+
                 # Forward pass
                 optimizer.zero_grad()
                 outputs = self.model(p1_embeddings, p2_embeddings)
+
+                # Ensure consistent dimensions
+                outputs = outputs.view(-1)  # Add this line
+                affinities = affinities.view(-1)  # Add this line
+
                 loss = criterion(outputs.squeeze(), affinities)
-                
+
                 # Backward pass
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 optimizer.step()
-                
+
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': loss.item()})
-        
+
         return total_loss / len(train_loader)
 
-    def _validate_epoch(self, 
+    def _validate_epoch(self,
                        val_loader: DataLoader,
                        criterion: nn.Module) -> float:
         """Validate for one epoch"""
         self.model.eval()
         total_loss = 0
-        
+
         with torch.no_grad():
             for p1_seqs, p2_seqs, affinities in val_loader:
                 p1_embeddings = self.encode_proteins(p1_seqs)
                 p2_embeddings = self.encode_proteins(p2_seqs)
                 affinities = affinities.to(self.device)
-                
+
                 outputs = self.model(p1_embeddings, p2_embeddings)
+
+                # Ensure consistent dimensions
+                outputs = outputs.view(-1)
+                affinities = affinities.view(-1)
+
                 loss = criterion(outputs.squeeze(), affinities)
                 total_loss += loss.item()
-        
+
         return total_loss / len(val_loader)
 
     def evaluate(self, test_loader: DataLoader) -> Dict[str, float]:
@@ -397,20 +428,25 @@ class ProteinProteinAffinityTrainer:
         total_loss = 0
         predictions = []
         actuals = []
-        
+
         with torch.no_grad():
             for p1_seqs, p2_seqs, affinities in tqdm(test_loader, desc='Evaluating'):
                 p1_embeddings = self.encode_proteins(p1_seqs)
                 p2_embeddings = self.encode_proteins(p2_seqs)
                 affinities = affinities.to(self.device)
-                
+
                 outputs = self.model(p1_embeddings, p2_embeddings)
+
+                # Ensure consistent dimensions
+                outputs = outputs.view(-1)
+                affinities = affinities.view(-1)
+
                 loss = criterion(outputs.squeeze(), affinities)
                 total_loss += loss.item()
-                
+
                 predictions.extend(outputs.cpu().numpy())
                 actuals.extend(affinities.cpu().numpy())
-        
+
         mse = total_loss / len(test_loader)
         return {
             'mse': mse,
@@ -418,9 +454,6 @@ class ProteinProteinAffinityTrainer:
             'predictions': predictions,
             'actuals': actuals
         }
-
-
-
 
 def main():
     """
@@ -450,7 +483,7 @@ def main():
 
     try:
         # Create directories for outputs
-        output_dir = Path('output') 
+        output_dir = Path('output')
         output_dir.mkdir(parents=True, exist_ok=True)
         model_dir = output_dir / 'models'
         model_dir.mkdir(exist_ok=True)
@@ -460,11 +493,11 @@ def main():
         df = pd.read_csv(data_path, index_col = [0])[['pdb_id', 'pkd', 'protein1_sequence', 'protein2_sequence']]
         # Convert dataframe columns to lists
         protein1_sequences = df['protein1_sequence'].tolist()
-        protein2_sequences = df['protein2_sequence'].tolist() 
+        protein2_sequences = df['protein2_sequence'].tolist()
         affinities = df['pkd'].tolist()
 
         # Remove any empty sequences
-        valid_indices = [i for i in range(len(protein1_sequences)) 
+        valid_indices = [i for i in range(len(protein1_sequences))
                         if protein1_sequences[i] and protein2_sequences[i]]
         protein1_sequences = [protein1_sequences[i] for i in valid_indices]
         protein2_sequences = [protein2_sequences[i] for i in valid_indices]
@@ -555,12 +588,12 @@ def main():
         logger.info("Running example inference...")
         example_p1 = protein1_sequences[0]
         example_p2 = protein2_sequences[0]
-        
+
         with torch.no_grad():
             p1_embedding = trainer.encode_proteins([example_p1])
             p2_embedding = trainer.encode_proteins([example_p2])
             prediction = trainer.model(p1_embedding, p2_embedding)
-            
+
         logger.info(f"Example prediction for protein pair: {prediction.item():.2f}")
 
         # Save example to file
@@ -574,111 +607,120 @@ def main():
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}", exc_info=True)
         raise
-def hyperparam_tune(): 
-    def objective(trial):
-    # Hyperparameters to tune
-        embedding_dim = trial.suggest_int('embedding_dim', 128, 1024, step = 32)
-        linear_dim = trial.suggest_int('linear_dim', 64, 2048, step = 64)
-        num_attention_layers = trial.suggest_int('num_attention_layers', 2, 6)
-        num_heads = trial.suggest_int('num_heads', 3, 6)
-        dropout_rate = trial.suggest_float('dropout_rate', 0, 0.25, step = 0.05)
-        learning_rate = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 3e-4])
-        batch_size = trial.suggest_int('batch_size', 1, 10)
-        epochs = trial.suggest_categorical('epochs', 100, 300, step = 50)
-        patience = trial.suggest_categorical('patience', 5, 20, step = 5)
-    
-        output_dir = Path('output') 
-        output_dir.mkdir(parents=True, exist_ok=True)
-        model_dir = output_dir / 'models'
-        model_dir.mkdir(exist_ok=True)
+def hyperparam_tune():
+  logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('protein_affinity.log'),
+            logging.StreamHandler()
+        ]
+    )
+  logger = logging.getLogger(__name__)
+  def objective(trial):
+  # Hyperparameters to tune
+      linear_dim = trial.suggest_int('linear_dim', 64, 2048, step = 64)
+      num_attention_layers = trial.suggest_int('num_attention_layers', 2, 6)
+      num_heads = trial.suggest_categorical('num_heads', [2, 3, 4, 6, 8])
+      dropout_rate = trial.suggest_float('dropout_rate', 0, 0.25, step = 0.05)
+      learning_rate = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 3e-4])
+      batch_size = trial.suggest_int('batch_size', 1, 10)
+      epochs = trial.suggest_int('epochs', 100, 300, step = 50)
+      patience = trial.suggest_int('patience', 5, 20, step = 5)
 
-        # Load protein sequences and binding affinities from CSV data
-        data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
-        logger.info(f"Loading data from {data_path}")
-        # Read the CSV file using pandas
-        df = pd.read_csv(data_path)
-            
-        # Convert dataframe columns to lists
-        protein1_sequences = df['protein1_sequence'].tolist()
-        protein2_sequences = df['protein2_sequence'].tolist() 
-        affinities = df['pkd'].tolist()
+      output_dir = Path('output')
+      output_dir.mkdir(parents=True, exist_ok=True)
+      model_dir = output_dir / 'models'
+      model_dir.mkdir(exist_ok=True)
 
-        # Remove any empty sequences
-        valid_indices = [i for i in range(len(protein1_sequences)) 
-                        if protein1_sequences[i] and protein2_sequences[i]]
-        protein1_sequences = [protein1_sequences[i] for i in valid_indices]
-        protein2_sequences = [protein2_sequences[i] for i in valid_indices]
-        affinities = [affinities[i] for i in valid_indices]
+      # Load protein sequences and binding affinities from CSV data
+      data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
+      logger.info(f"Loading data from {data_path}")
+      # Read the CSV file using pandas
+      df = pd.read_csv(data_path)
 
-        # Log data loading status
-        logger.info(f"Loaded {len(protein1_sequences)} protein pairs")
-    
-        config = ModelConfig(
-            input_dim=768,
-            embedding_dim=embedding_dim,
-            linear_dim=linear_dim,
-            num_attention_layers=num_attention_layers,
-            num_heads=num_heads,
-            dropout_rate=dropout_rate
-        )
+      # Convert dataframe columns to lists
+      protein1_sequences = df['protein1_sequence'].tolist()
+      protein2_sequences = df['protein2_sequence'].tolist()
+      affinities = df['pkd'].tolist()
 
-        # Save configuration
-        with open(output_dir / 'config.json', 'w') as f:
-            config_dict = {k: v for k, v in config.__dict__.items()}
-            json.dump(config_dict, f, indent=4)
+      # Remove any empty sequences
+      valid_indices = [i for i in range(len(protein1_sequences))
+                      if protein1_sequences[i] and protein2_sequences[i]]
+      protein1_sequences = [protein1_sequences[i] for i in valid_indices]
+      protein2_sequences = [protein2_sequences[i] for i in valid_indices]
+      affinities = [affinities[i] for i in valid_indices]
 
-        # Initialize trainer
-        logger.info("Initializing trainer...")
-        trainer = ProteinProteinAffinityTrainer(
-            config=config,
-            cache_dir=str(output_dir / 'embedding_cache')
-        )
+      # Log data loading status
+      logger.info(f"Loaded {len(protein1_sequences)} protein pairs")
 
-        # Prepare data
-        logger.info("Preparing data...")
-        train_loader, val_loader, test_loader = trainer.prepare_data(
-            protein1_sequences=protein1_sequences,
-            protein2_sequences=protein2_sequences,
-            affinities=affinities,
-            batch_size=batch_size,
-            test_size=0.2,
-            val_size=0.1
-        )
+      config = ModelConfig(
+          input_dim=768,
+          embedding_dim=256,
+          linear_dim=linear_dim,
+          num_attention_layers=num_attention_layers,
+          num_heads=num_heads,
+          dropout_rate=dropout_rate
+      )
 
-        # Training
-        logger.info("Starting training...")
-        history = trainer.train(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=epochs,
-            learning_rate=learning_rate,
-            save_dir=str(model_dir),
-            model_name='protein_affinity_model.pt',
-            patience=patience
-        )
+      # Save configuration
+      with open(output_dir / 'config.json', 'w') as f:
+          config_dict = {k: v for k, v in config.__dict__.items()}
+          json.dump(config_dict, f, indent=4)
 
-        # Evaluation
-        logger.info("Evaluating model...")
-        results = trainer.evaluate(test_loader)
+      # Initialize trainer
+      logger.info("Initializing trainer...")
+      trainer = ProteinProteinAffinityTrainer(
+          config=config,
+          cache_dir=str(output_dir / 'embedding_cache')
+      )
 
-        # Save evaluation results
-        with open(output_dir / 'evaluation_results.json', 'w') as f:
-            eval_results = {
-                'mse': float(results['mse']),
-                'rmse': float(results['rmse'])
-            }
-            json.dump(eval_results, f, indent=4)
-            
-        return results['mse']
-        
-    number_of_trials = 1000
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=number_of_trials)
-    good_trial = study.best_trial
-    
-    for key, value in good_trial.params.items():
-            print("    {}: {}".format(key, value))
+      # Prepare data
+      logger.info("Preparing data...")
+      train_loader, val_loader, test_loader = trainer.prepare_data(
+          protein1_sequences=protein1_sequences,
+          protein2_sequences=protein2_sequences,
+          affinities=affinities,
+          batch_size=batch_size,
+          test_size=0.2,
+          val_size=0.1
+      )
+
+      # Training
+      logger.info("Starting training...")
+      history = trainer.train(
+          train_loader=train_loader,
+          val_loader=val_loader,
+          epochs=epochs,
+          learning_rate=learning_rate,
+          save_dir=str(model_dir),
+          model_name='protein_affinity_model.pt',
+          patience=patience
+      )
+
+      # Evaluation
+      logger.info("Evaluating model...")
+      results = trainer.evaluate(test_loader)
+
+      # Save evaluation results
+      with open(output_dir / 'evaluation_results.json', 'w') as f:
+          eval_results = {
+              'mse': float(results['mse']),
+              'rmse': float(results['rmse'])
+          }
+          json.dump(eval_results, f, indent=4)
+
+      return results['mse']
+
+  number_of_trials = 1000
+  study = optuna.create_study(direction="minimize")
+  study.optimize(objective, n_trials=number_of_trials)
+  good_trial = study.best_trial
+
+  for key, value in good_trial.params.items():
+          print("    {}: {}".format(key, value))
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    hyperparam_tune()
