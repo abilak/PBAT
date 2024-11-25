@@ -268,7 +268,7 @@ class ProteinProteinAffinityTrainer:
                     batch_embeddings.append(embedding)
 
             embeddings.extend([emb.to(self.device) for emb in batch_embeddings])
-
+        self.protein_cache.save('caches.pt') # only use for debugging to see if cache is working, it uses a lot of storage quickly
         return torch.cat(embeddings)
 
     def prepare_data(self,
