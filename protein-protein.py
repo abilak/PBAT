@@ -202,6 +202,8 @@ class ProteinEmbeddingCache:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+        truth_value = self.load(os.path.join(cache_dir, 'caches.pt')) # loading cache if it is there, so we can just upload
+        # the caches when we start from the previous training run
 
     def get(self, protein_sequence: str) -> Optional[torch.Tensor]:
         return self.cache.get(protein_sequence)
@@ -268,7 +270,7 @@ class ProteinProteinAffinityTrainer:
                     batch_embeddings.append(embedding)
 
             embeddings.extend([emb.to(self.device) for emb in batch_embeddings])
-        self.protein_cache.save('caches.pt') # only use for debugging to see if cache is working, it uses a lot of storage quickly
+        self.protein_cache.save('caches.pt') # allows us to download the caches and use them for model training again when we need them
         return torch.cat(embeddings)
 
     def prepare_data(self,
