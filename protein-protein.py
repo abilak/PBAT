@@ -86,8 +86,7 @@ class ModelConfig:
 
 def calculate_mean_scale():
     data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
-
-    df = pd.read_csv(data_path)
+    df = pd.read_csv(data_path)[0:100]
     affinities = df['pkd']
     mean = affinities.mean()
     scale = affinities.std()
@@ -384,10 +383,9 @@ class ProteinProteinAffinityTrainer:
                 outputs = self.model(p1_embeddings, p2_embeddings)
 
                 # Ensure consistent dimensions
-                outputs = outputs.view(-1)  # Add this line
-                affinities = affinities.view(-1)  # Add this line
-
-                loss = criterion(outputs.squeeze(), affinities)
+                outputs = outputs.view(-1)  # Flatten outputs to 1D
+                affinities = affinities.view(-1)  # Flatten targets to 1D
+                loss = criterion(outputs, affinities)
 
                 # Backward pass
                 loss.backward()
@@ -414,11 +412,10 @@ class ProteinProteinAffinityTrainer:
 
                 outputs = self.model(p1_embeddings, p2_embeddings)
 
-                # Ensure consistent dimensions
-                outputs = outputs.view(-1)
-                affinities = affinities.view(-1)
+                outputs = outputs.view(-1)  # Flatten outputs to 1D
+                affinities = affinities.view(-1)  # Flatten targets to 1D
 
-                loss = criterion(outputs.squeeze(), affinities)
+                loss = criterion(outputs, affinities)
                 total_loss += loss.item()
 
         return total_loss / len(val_loader)
@@ -443,7 +440,7 @@ class ProteinProteinAffinityTrainer:
                 outputs = outputs.view(-1)
                 affinities = affinities.view(-1)
 
-                loss = criterion(outputs.squeeze(), affinities)
+                loss = criterion(outputs, affinities)
                 total_loss += loss.item()
 
                 predictions.extend(outputs.cpu().numpy())
