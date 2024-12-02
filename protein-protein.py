@@ -623,7 +623,7 @@ def hyperparam_tune():
   # Hyperparameters to tune
       linear_dim = trial.suggest_int('linear_dim', 64, 2048, step = 64)
       num_attention_layers = trial.suggest_int('num_attention_layers', 2, 6)
-      num_heads = trial.suggest_categorical('num_heads', [2, 3, 4, 6, 8])
+      num_heads = trial.suggest_categorical('num_heads', [2, 4, 8, 16, 32])
       dropout_rate = trial.suggest_float('dropout_rate', 0, 0.25, step = 0.05)
       learning_rate = trial.suggest_categorical('learning_rate', [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 3e-4])
       batch_size = trial.suggest_int('batch_size', 1, 10)
