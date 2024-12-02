@@ -29,13 +29,23 @@ class ModelConfig:
         self.num_attention_layers = num_attention_layers
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
+
+def calculate_mean_scale():
+    data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
+
+    df = pd.read_csv(data_path)[0:100]
+    affinities = df['pkd']
+    mean = affinities.mean()
+    scale = affinities.std()
+    return mean, scale
+
 class ProteinPairDataset(Dataset):
     """Dataset for protein pairs and their binding affinities"""
     def __init__(self, protein1_sequences: List[str], 
                  protein2_sequences: List[str], 
                  affinities: torch.Tensor,
-                 mean: float = 6.51286529169358,
-                 scale: float = 1.5614094578916633):
+                 mean: float = calculate_mean_scale()[0],
+                 scale: float = calculate_mean_scale()[1]):
         assert len(protein1_sequences) == len(protein2_sequences) == len(affinities)
         # Convert sequences to strings explicitly
         self.protein1_sequences = [str(seq).strip() for seq in protein1_sequences]
@@ -316,7 +326,11 @@ class ProteinProteinAffinityTrainer:
                 # Forward pass
                 optimizer.zero_grad()
                 outputs = self.model(p1_embeddings, p2_embeddings)
-                loss = criterion(outputs.squeeze(), affinities)
+                outputs = outputs.view(-1)  # Flatten outputs to 1D
+                affinities = affinities.view(-1)  # Flatten targets to 1D
+                loss = criterion(outputs, affinities)
+
+
                 
                 # Backward pass
                 loss.backward()
@@ -342,7 +356,10 @@ class ProteinProteinAffinityTrainer:
                 affinities = affinities.to(self.device)
                 
                 outputs = self.model(p1_embeddings, p2_embeddings)
-                loss = criterion(outputs.squeeze(), affinities)
+                outputs = outputs.view(-1)  # Flatten outputs to 1D
+                affinities = affinities.view(-1)  # Flatten targets to 1D
+
+                loss = criterion(outputs, affinities)
                 total_loss += loss.item()
         
         return total_loss / len(val_loader)
@@ -362,7 +379,11 @@ class ProteinProteinAffinityTrainer:
                 affinities = affinities.to(self.device)
                 
                 outputs = self.model(p1_embeddings, p2_embeddings)
-                loss = criterion(outputs.squeeze(), affinities)
+                
+                outputs = outputs.view(-1)  # Flatten outputs to 1D
+                affinities = affinities.view(-1)  # Flatten targets to 1D
+
+                loss = criterion(outputs, affinities)
                 total_loss += loss.item()
                 
                 predictions.extend(outputs.cpu().numpy())
@@ -414,7 +435,7 @@ def main():
         data_path = os.path.join(os.getcwd(), "data/Protein-Protein-Binding-Affinity-Data", "Data.csv")
         logger.info(f"Loading data from {data_path}")
         # Read the CSV file using pandas
-        df = pd.read_csv(data_path)
+        df = pd.read_csv(data_path)[0:100]
             
         # Convert dataframe columns to lists
         protein1_sequences = df['protein1_sequence'].tolist()
@@ -520,19 +541,15 @@ def main():
         with torch.no_grad():
             p1_embedding = trainer.encode_proteins([example_p1])
             p2_embedding = trainer.encode_proteins([example_p2])
-            prediction = trainer.model(p1_embedding, p2_embedding)
+            prediction = trainer.model(p1_embedding, p2_embedding).item()  # Convert tensor to scalar
 
-        
-        logger.info(f"Example prediction for protein pair:")
-        logger.info(f"Negative log10 affinity (M): {prediction['neg_log10_affinity_M'].item():.2f}")
-        logger.info(f"Affinity (μM): {prediction['affinity_uM'].item():.2f}")
+        logger.info(f"Example prediction for protein pair {example_p1}, {example_p2}: {prediction}")
 
         # Save example to file
         with open(output_dir / 'example_inference.txt', 'w') as f:
             f.write(f"Protein 1: {example_p1}\n")
             f.write(f"Protein 2: {example_p2}\n")
-            f.write(f"Negative log10 affinity (M): {prediction['neg_log10_affinity_M'].item():.2f}\n")
-            f.write(f"Affinity (μM): {prediction['affinity_uM'].item():.2f}\n")
+            f.write(f"Example prediction for protein pair {example_p1}, {example_p2}: {prediction}\n")
 
         logger.info(f"All outputs saved to {output_dir}")
 
